@@ -108,9 +108,11 @@
         }, 1500);
 
         // State for Recoil
-        const RECOIL_THRESHOLD = 0.05; // Movement distance UP to trigger fire
+        const RECOIL_THRESHOLD = 0.025; // Movement distance UP to trigger fire
         let prevIndexTipY = 0;
+        let prevIndexTipX = 0;
         let lastGunPoseTime = 0;
+        let lastValidTip = { x: 0, y: 0 }; // Track stable tip position
 
         function isFingerExtended(landmarks, fingerTipIdx, fingerPipIdx) {
             return landmarks[fingerTipIdx].y < landmarks[fingerPipIdx].y;
@@ -200,6 +202,8 @@
                 if (isGunPose) {
                     crosshairColor = '#00FF00'; // Green if ready
                     lastGunPoseTime = currentTime;
+                    // Update stable tip position
+                    lastValidTip = { x: indexTip.x, y: indexTip.y };
                 }
 
                 // Draw Crosshair
@@ -218,27 +222,34 @@
                 canvasCtx.stroke();
 
                 // Debug info
-                debugElement.innerText = `Score: ${score}\nGun Pose: ${isGunPose ? 'YES' : 'NO'}\nThumbUp: ${isThumbPointsUp}\nOthersCurled: ${isMiddleCurled && isRingCurled && isPinkyCurled}`;
+                let debugText = `Score: ${score}\nGun Pose: ${isGunPose ? 'YES' : 'NO'}\nThumbUp: ${isThumbPointsUp}\nOthersCurled: ${isMiddleCurled && isRingCurled && isPinkyCurled}`;
 
                 // Firing Logic: Recoil
                 // Check if index tip moved UP rapidly while in Gun Pose (or recently in gun pose)
 
                 const tipY = indexTip.y;
                 const deltaY = prevIndexTipY - tipY; // Positive if moving UP (y decreasing)
+                let rejectionReason = null;
 
-                // Allow firing if we were in gun pose recently (within 200ms) 
-                if (currentTime - lastGunPoseTime < 300) {
+                // Allow firing if we were in gun pose recently (within 500ms) 
+                if (currentTime - lastGunPoseTime < 500) {
                     if (deltaY > RECOIL_THRESHOLD) {
-                        if (!isShooting && currentTime - lastShotTime > SHOT_COOLDOWN) {
+                        const deltaX = Math.abs(prevIndexTipX - indexTip.x);
+                        // Stability Check: Origin Check
+                        const originDist = Math.hypot(prevIndexTipX - lastValidTip.x, prevIndexTipY - lastValidTip.y);
+
+                        if (originDist > 0.2) {
+                            rejectionReason = "BadOrigin";
+                        } else if (!isShooting && currentTime - lastShotTime > SHOT_COOLDOWN) {
                             // FIRE!
                             isShooting = true;
                             lastShotTime = currentTime;
                             canvasCtx.fillStyle = 'rgba(255, 255, 0, 0.5)'; // Flash yellow
-                            canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
 
                             // Check Collision
-                            const nAimX = indexTip.x;
-                            const nAimY = indexTip.y;
+                            // Use PREVIOUS tip positions (before recoil movement) for fresh, instant accuracy
+                            const nAimX = prevIndexTipX;
+                            const nAimY = prevIndexTipY;
 
                             let hit = false;
                             for (let i = targets.length - 1; i >= 0; i--) {
@@ -259,16 +270,23 @@
                     }
                 }
 
+                if (rejectionReason) {
+                    debugText += `\nREJECT: ${rejectionReason}`;
+                }
+                debugElement.innerText = debugText;
+
                 // Reset isShooting if we are not moving up fast anymore
                 if (deltaY <= RECOIL_THRESHOLD / 2) {
                     isShooting = false;
                 }
 
                 prevIndexTipY = tipY;
+                prevIndexTipX = indexTip.x;
 
             } else {
                 debugElement.innerText = `Score: ${score}\nNo Hand Detected`;
                 prevIndexTipY = 0;
+                prevIndexTipX = 0;
             }
 
             canvasCtx.restore();

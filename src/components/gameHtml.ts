@@ -58,6 +58,7 @@ export const gameHtml = `
         let score = 0;
         let lastShotTime = 0;
         let isShooting = false;
+        let shotMarker = { x: 0, y: 0, time: 0 };
         const SHOT_COOLDOWN = 500; // ms
         const PINCH_THRESHOLD = 0.05; // Relative distance
         
@@ -87,9 +88,11 @@ export const gameHtml = `
         }, 1500);
 
         // State for Recoil
-        const RECOIL_THRESHOLD = 0.05; // Movement distance UP to trigger fire
+        const RECOIL_THRESHOLD = 0.025; // Movement distance UP to trigger fire
         let prevIndexTipY = 0;
+        let prevIndexTipX = 0;
         let lastGunPoseTime = 0;
+        let lastValidTip = { x: 0, y: 0 }; // Track stable tip position
 
         function isFingerExtended(landmarks, fingerTipIdx, fingerPipIdx) {
             return landmarks[fingerTipIdx].y < landmarks[fingerPipIdx].y;
@@ -106,12 +109,40 @@ export const gameHtml = `
             return landmarks[fingerTipIdx].y > landmarks[fingerPipIdx].y;
         }
 
+        // Audio Synthesis
+        let audioCtx;
+        let lastAudioTime = 0;
+        function playShootSound() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            lastAudioTime = Date.now();
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.1);
+            
+            gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.1);
+        }
+
         function onResults(results) {
             canvasCtx.save();
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             
             // Draw Camera Feed
-            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            // canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
 
             // Game Logic
             const currentTime = Date.now();
@@ -179,6 +210,8 @@ export const gameHtml = `
                 if (isGunPose) {
                     crosshairColor = '#00FF00'; // Green if ready
                     lastGunPoseTime = currentTime;
+                    // Update stable tip position
+                    lastValidTip = { x: indexTip.x, y: indexTip.y };
                 }
 
                 // Draw Crosshair
@@ -188,36 +221,48 @@ export const gameHtml = `
                 canvasCtx.arc(aimX, aimY, 20, 0, 2 * Math.PI); 
                 canvasCtx.stroke();
                 
-                // Draw Sight lines
-                canvasCtx.beginPath();
-                canvasCtx.moveTo(aimX - 30, aimY);
-                canvasCtx.lineTo(aimX + 30, aimY);
-                canvasCtx.moveTo(aimX, aimY - 30);
-                canvasCtx.lineTo(aimX, aimY + 30);
-                canvasCtx.stroke();
-                
-                // Debug info
-                debugElement.innerText = \`Score: \${score}\\nGun Pose: \${isGunPose ? 'YES' : 'NO'}\\nThumbUp: \${isThumbPointsUp}\\nOthersCurled: \${isMiddleCurled && isRingCurled && isPinkyCurled}\`;
-
                 // Firing Logic: Recoil
                 // Check if index tip moved UP rapidly while in Gun Pose (or recently in gun pose)
                 
                 const tipY = indexTip.y;
                 const deltaY = prevIndexTipY - tipY; // Positive if moving UP (y decreasing)
+                let rejectionReason = null;
                 
-                // Allow firing if we were in gun pose recently (within 200ms) 
-                if (currentTime - lastGunPoseTime < 300) {
+                // Allow firing if we were in gun pose recently (within 500ms) 
+                if (currentTime - lastGunPoseTime < 500) {
                      if (deltaY > RECOIL_THRESHOLD) {
-                        if (!isShooting && currentTime - lastShotTime > SHOT_COOLDOWN) {
-                             // FIRE!
+                        // Stability Checks:
+                        // 1. Check for horizontal glitch (finger swap) - Max X shift
+                        // 2. Check for impossible speed (clean recoil is fast but not instantaneous teleport)
+                        const deltaX = Math.abs(prevIndexTipX - indexTip.x);
+                        
+                        // New Stability Check: Origin Check
+                        // Ensure the "start" of the recoil (prevIndexTip) was close to the last VALID gun tip.
+                        // If tracking glitched to a new finger, prevIndexTip might be correct for THAT finger, 
+                        // but it would be far from where the gun tip was.
+                        const originDist = Math.hypot(prevIndexTipX - lastValidTip.x, prevIndexTipY - lastValidTip.y);
+
+                        if (deltaX > 0.1) {
+                            rejectionReason = "StableX"; // Horizontal shift too high
+                        } else if (originDist > 0.2) {
+                            rejectionReason = "BadOrigin"; // Origin was too far from known gun tip
+                        } else if (deltaY > 0.3) {
+                            rejectionReason = "TooFast"; // Implausible vertical jump
+                        } else if (!isShooting && currentTime - lastShotTime > SHOT_COOLDOWN) {
+                            // FIRE!
                             isShooting = true;
                             lastShotTime = currentTime;
-                            canvasCtx.fillStyle = 'rgba(255, 255, 0, 0.5)'; // Flash yellow
-                            canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+                            playShootSound();
                             
                             // Check Collision
-                            const nAimX = indexTip.x;
-                            const nAimY = indexTip.y; 
+                            // Use PREVIOUS tip positions (before recoil movement) for fresh, instant accuracy
+                            // We still use lastValidTip for the SAFETY check above, but for the actual bullet, 
+                            // we want where the finger IS, not where it WAS seconds ago.
+                            const nAimX = prevIndexTipX;
+                            const nAimY = prevIndexTipY; 
+                            
+                            // Update visual marker
+                            shotMarker = { x: nAimX, y: nAimY, time: currentTime };
                             
                             let hit = false;
                             for (let i = targets.length - 1; i >= 0; i--) {
@@ -230,6 +275,7 @@ export const gameHtml = `
                                    targets.splice(i, 1);
                                    score += 10;
                                    hit = true;
+                                   console.log("SENDING SCORE");
                                    sendMessageToRN({ type: 'SCORE_UPDATE', score: score });
                                    break;
                                }
@@ -242,14 +288,40 @@ export const gameHtml = `
                 if (deltaY <= RECOIL_THRESHOLD / 2) {
                     isShooting = false;
                 }
+
+                // Debug info
+                let debugText = \`Score: \${score}\\nGun Pose: \${isGunPose ? 'YES' : 'NO'}\\nThumbUp: \${isThumbPointsUp}\\nOthersCurled: \${isMiddleCurled && isRingCurled && isPinkyCurled}\`;
+                if (Date.now() - lastAudioTime < 500) {
+                    debugText += '\\nBang! (Audio)';
+                }
+                if (rejectionReason) {
+                    debugText += \`\\nREJECT: \${rejectionReason}\`;
+                }
+                debugElement.innerText = debugText;
                 
                 prevIndexTipY = tipY;
+                prevIndexTipX = indexTip.x;
 
             } else {
                 debugElement.innerText = \`Score: \${score}\\nNo Hand Detected\`;
                 prevIndexTipY = 0; 
+                prevIndexTipX = 0;
             }
             
+            // Draw Shot Marker
+            if (currentTime - shotMarker.time < 1000) {
+                const markerX = shotMarker.x * canvasElement.width;
+                const markerY = shotMarker.y * canvasElement.height;
+                
+                canvasCtx.beginPath();
+                canvasCtx.arc(markerX, markerY, 15, 0, 2 * Math.PI);
+                canvasCtx.lineWidth = 3;
+                canvasCtx.strokeStyle = 'cyan';
+                canvasCtx.stroke();
+                canvasCtx.fillStyle = 'rgba(0, 255, 255, 0.3)';
+                canvasCtx.fill();
+            }
+
             canvasCtx.restore();
         }
 
@@ -257,11 +329,7 @@ export const gameHtml = `
             if (window.ReactNativeWebView) {
                 window.ReactNativeWebView.postMessage(JSON.stringify(data));
             } else {
-                // Compatible "postMessage" for Web (if embedded in iframe but accessed directly, it might fail, 
-                // but react-native-webview on web typically handles this via window.parent.postMessage if robust, 
-                // or we leave it. For now, we mainly care about receiving it)
-                // Actually, if we are running the HTML content directly in an iframe created by react-native-web-webview, 
-                // the mechanism is slightly different. Let's stick to standard postMessage.
+                // Compatible "postMessage" for Web
                 window.parent.postMessage(JSON.stringify(data), "*");
             }
         }
