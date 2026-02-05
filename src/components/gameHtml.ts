@@ -61,6 +61,7 @@ export const gameHtml = `
         let shotMarker = { x: 0, y: 0, time: 0 };
         const SHOT_COOLDOWN = 500; // ms
         const PINCH_THRESHOLD = 0.05; // Relative distance
+        const POSE_SENSITIVITY = 0.05; // Tolerance for pose detection
         
         // Setup Canvas Size
         function resizeCanvas() {
@@ -92,7 +93,14 @@ export const gameHtml = `
         let prevIndexTipY = 0;
         let prevIndexTipX = 0;
         let lastGunPoseTime = 0;
+
         let lastValidTip = { x: 0, y: 0 }; // Track stable tip position
+
+        // Smoothing State
+        let smoothedTipX = null;
+        let smoothedTipY = null;
+        const SMOOTHING_FACTOR = 0.5;
+        const JUMP_LIMIT = 0.1;
 
         function isFingerExtended(landmarks, fingerTipIdx, fingerPipIdx) {
             return landmarks[fingerTipIdx].y < landmarks[fingerPipIdx].y;
@@ -102,11 +110,11 @@ export const gameHtml = `
         function isThumbUp(landmarks) {
              const thumbTip = landmarks[4];
              const thumbIP = landmarks[3];
-             return thumbTip.y < thumbIP.y;
+             return thumbTip.y < thumbIP.y + POSE_SENSITIVITY;
         }
 
         function isFingerCurled(landmarks, fingerTipIdx, fingerPipIdx) {
-            return landmarks[fingerTipIdx].y > landmarks[fingerPipIdx].y;
+            return landmarks[fingerTipIdx].y > landmarks[fingerPipIdx].y - POSE_SENSITIVITY;
         }
 
         // Audio Synthesis
@@ -180,8 +188,8 @@ export const gameHtml = `
                 const landmarks = results.multiHandLandmarks[0];
 
                 // Draw Hand Landmarks and Connections
-                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
-                drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
+                // drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
+                // drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
                 
                 // Landmarks
                 const indexTip = landmarks[8];
@@ -194,8 +202,30 @@ export const gameHtml = `
                 const pinkyTip = landmarks[20];
                 const pinkyPIP = landmarks[18];
                 
-                aimX = indexTip.x * canvasElement.width;
-                aimY = indexTip.y * canvasElement.height;
+                // Smoothing Logic
+                if (smoothedTipX === null) {
+                    smoothedTipX = indexTip.x;
+                    smoothedTipY = indexTip.y;
+                } else {
+                    // 1. Jump Clamp (Teleport protection)
+                    const dist = Math.hypot(indexTip.x - smoothedTipX, indexTip.y - smoothedTipY);
+                    let targetX = indexTip.x;
+                    let targetY = indexTip.y;
+                    
+                    if (dist > JUMP_LIMIT) {
+                        // Clamp the target to be at the limit edge towards the new point
+                        const angle = Math.atan2(indexTip.y - smoothedTipY, indexTip.x - smoothedTipX);
+                        targetX = smoothedTipX + Math.cos(angle) * JUMP_LIMIT;
+                        targetY = smoothedTipY + Math.sin(angle) * JUMP_LIMIT;
+                    }
+
+                    // 2. Lerp Smoothing
+                    smoothedTipX += (targetX - smoothedTipX) * SMOOTHING_FACTOR;
+                    smoothedTipY += (targetY - smoothedTipY) * SMOOTHING_FACTOR;
+                }
+
+                aimX = smoothedTipX * canvasElement.width;
+                aimY = smoothedTipY * canvasElement.height;
                 
                 // Gun Pose Detection
                 // Index Extended, Thumb Up, Others Curled
@@ -258,8 +288,10 @@ export const gameHtml = `
                             // Use PREVIOUS tip positions (before recoil movement) for fresh, instant accuracy
                             // We still use lastValidTip for the SAFETY check above, but for the actual bullet, 
                             // we want where the finger IS, not where it WAS seconds ago.
-                            const nAimX = prevIndexTipX;
-                            const nAimY = prevIndexTipY; 
+                            // Use SMOOTHED position for the bullet to match the crosshair visual
+                            // This also naturally ignores the recoil spike because smoothing lags/damps it.
+                            const nAimX = smoothedTipX;
+                            const nAimY = smoothedTipY; 
                             
                             // Update visual marker
                             shotMarker = { x: nAimX, y: nAimY, time: currentTime };
@@ -306,6 +338,8 @@ export const gameHtml = `
                 debugElement.innerText = \`Score: \${score}\\nNo Hand Detected\`;
                 prevIndexTipY = 0; 
                 prevIndexTipX = 0;
+                smoothedTipX = null;
+                smoothedTipY = null;
             }
             
             // Draw Shot Marker
